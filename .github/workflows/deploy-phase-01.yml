@@ -1,0 +1,77 @@
+name: Deploy Phase 01 — Service Bus + Functions
+
+# Empacota e publica as Azure Functions .NET 8 (isolated worker) da Fase 1
+# (EPIC-002 / Story 2.1). Dispara no push da branch da fase ou manualmente.
+#
+# Pré-requisitos (configurados pelo @devops / por aluno):
+#   - secret  PHASE01_FUNCTION_PUBLISH_PROFILE : publish profile da Function App
+#   - var     PHASE01_FUNCTION_APP_NAME        : nome da Function App de destino
+
+on:
+  push:
+    branches: [phase-01-servicebus-functions]
+    paths:
+      - 'src/Fifa2026.V2.Functions/**'
+      - '.github/workflows/deploy-phase-01.yml'
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'Azure Function App name (override)'
+        required: false
+
+env:
+  PROJECT_PATH: 'src/Fifa2026.V2.Functions'
+  DOTNET_VERSION: '8.0.x'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore ${{ env.PROJECT_PATH }}
+
+      - name: Build
+        run: dotnet build ${{ env.PROJECT_PATH }} -c Release --no-restore
+
+      - name: Test
+        # Sem --no-build: o dotnet test faz restore+build do projeto de testes
+        # (e da dependência Fifa2026.V2.Functions) em Release. Usar --no-build
+        # aqui falharia porque os steps Restore/Build acima cobrem apenas o
+        # projeto das Functions, não o de testes (fix do gate S2.1 / H-1).
+        run: dotnet test src/Fifa2026.V2.Functions.Tests -c Release --verbosity normal
+        continue-on-error: false
+
+      - name: Publish
+        run: dotnet publish ${{ env.PROJECT_PATH }} -c Release -o ./publish --no-build
+
+      - name: Deploy to Azure Functions
+        uses: Azure/functions-action@v1
+        with:
+          # Precedência: input manual → GitHub Variable (aluno).
+          app-name: ${{ github.event.inputs.app_name || vars.PHASE01_FUNCTION_APP_NAME }}
+          package: ./publish
+          publish-profile: ${{ secrets.PHASE01_FUNCTION_PUBLISH_PROFILE }}
+
+      - name: Smoke test (AC-10)
+        env:
+          APP_NAME: ${{ github.event.inputs.app_name || vars.PHASE01_FUNCTION_APP_NAME }}
+        run: |
+          set -euo pipefail
+          echo "Aguardando warmup da Function App (cold start)..."
+          sleep 20
+          curl -fsS "https://${APP_NAME}.azurewebsites.net/api/v2/purchase" \
+            -H "Content-Type: application/json" \
+            -d '{"matchId":1,"category":"VIP","userId":1,"quantity":1}' | tee response.json
+          # Falha o job se .correlationId não estiver presente na resposta.
+          jq -e '.correlationId' response.json
+          echo "Smoke test OK — .correlationId presente na resposta."
